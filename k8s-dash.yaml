@@ -1,0 +1,242 @@
+# k8s-dash: painel interativo servido pelo nginx, mostrando qual pod/nó respondeu cada requisição
+# Aplicar:  kubectl apply -f k8s-dash.yaml
+# Acessar:  http://localhost:8081  (porta mapeada no k3d para o Traefik)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k8s-dash-nginx
+data:
+  default.conf.template: |
+    server {
+      listen 80;
+      root /usr/share/nginx/html;
+
+      location / {
+        try_files $uri /index.html;
+      }
+
+      # endpoint que diz quem respondeu: nome do pod, IP do pod e nó
+      location = /api/info {
+        default_type application/json;
+        add_header Cache-Control "no-store";
+        return 200 '{"pod":"$hostname","ip":"$server_addr","node":"${NODE_NAME}","time":"$time_iso8601"}';
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k8s-dash-html
+data:
+  index.html: |
+    <!doctype html>
+    <html lang="pt-BR">
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>k8s dash</title>
+    <style>
+      :root{--bg:#0b1020;--card:#141b2f;--line:#24304f;--txt:#e6ebff;--mut:#8b96b8;--ok:#3ddc97;--warn:#ff6b6b;--acc:#7c5cff}
+      *{box-sizing:border-box}
+      body{margin:0;background:radial-gradient(1200px 600px at 10% -10%,#1d2550 0,transparent 60%),var(--bg);color:var(--txt);font:15px/1.4 system-ui,Segoe UI,Roboto,sans-serif;min-height:100vh}
+      header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:22px 28px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+      h1{margin:0;font-size:22px;letter-spacing:.3px}
+      h1 span{color:var(--acc)}
+      .live{display:inline-flex;align-items:center;gap:8px;color:var(--mut);font-size:13px}
+      .dot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(61,220,151,.6);animation:pulse 1.6s infinite}
+      .paused .dot{background:var(--mut);animation:none}
+      @keyframes pulse{70%{box-shadow:0 0 0 10px rgba(61,220,151,0)}100%{box-shadow:0 0 0 0 rgba(61,220,151,0)}}
+      main{padding:24px 28px;display:grid;gap:18px;grid-template-columns:repeat(12,1fr)}
+      .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+      .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:1px}
+      .v{font-size:26px;font-weight:700;margin-top:6px;word-break:break-all;font-family:ui-monospace,Consolas,monospace}
+      .s3{grid-column:span 3}.s8{grid-column:span 8}.s4{grid-column:span 4}.s12{grid-column:span 12}
+      @media(max-width:900px){.s3,.s4,.s8{grid-column:span 12}}
+      .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+      button{background:var(--acc);color:#fff;border:0;border-radius:10px;padding:10px 16px;font-weight:600;cursor:pointer;font-size:14px}
+      button.sec{background:transparent;border:1px solid var(--line);color:var(--txt)}
+      button:hover{filter:brightness(1.15)}
+      input[type=range]{accent-color:var(--acc);width:160px}
+      .bar{display:grid;grid-template-columns:230px 1fr 70px;gap:12px;align-items:center;margin:10px 0;transition:opacity .4s}
+      .bar.stale{opacity:.35}
+      .bar .name{font-family:ui-monospace,Consolas,monospace;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .bar .name small{display:block;color:var(--mut)}
+      .track{height:22px;background:#0e1426;border-radius:8px;overflow:hidden}
+      .fill{height:100%;border-radius:8px;transition:width .35s ease}
+      .bar .n{text-align:right;font-weight:700;font-family:ui-monospace,Consolas,monospace}
+      .tag{font-size:11px;padding:2px 6px;border-radius:6px;margin-left:6px;background:#3a1b25;color:var(--warn)}
+      #log{font-family:ui-monospace,Consolas,monospace;font-size:13px;max-height:260px;overflow:auto;margin:0;padding:0;list-style:none}
+      #log li{padding:6px 0;border-bottom:1px dashed var(--line);display:flex;gap:10px}
+      #log .t{color:var(--mut)}
+      #log .err{color:var(--warn)}
+      .sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-top:4px;flex:none}
+      .flash{animation:flash .5s}
+      @keyframes flash{from{background:#22306a}to{background:var(--card)}}
+      .empty{color:var(--mut)}
+    </style>
+    </head>
+    <body>
+    <header>
+      <h1>☸ k8s <span>dash</span></h1>
+      <div class="live" id="live"><span class="dot"></span><span id="liveTxt">ao vivo</span></div>
+    </header>
+    <main>
+      <div class="card s3" id="cPod"><div class="k">Pod que respondeu</div><div class="v" id="pod">—</div></div>
+      <div class="card s3"><div class="k">Nó</div><div class="v" id="node">—</div></div>
+      <div class="card s3"><div class="k">IP do pod</div><div class="v" id="ip">—</div></div>
+      <div class="card s3"><div class="k">Requisições / falhas</div><div class="v"><span id="total">0</span> / <span id="fails" style="color:var(--warn)">0</span></div></div>
+
+      <div class="card s12 controls">
+        <button id="toggle">⏸ Pausar</button>
+        <button id="burst">⚡ Rajada de 50</button>
+        <button class="sec" id="reset">↺ Zerar</button>
+        <span class="k" style="margin-left:8px">intervalo</span>
+        <input type="range" id="rate" min="100" max="2000" step="100" value="500">
+        <span id="rateTxt" class="k">500 ms</span>
+      </div>
+
+      <div class="card s8">
+        <div class="k">Distribuição de requisições por pod</div>
+        <div id="bars"><p class="empty">aguardando respostas…</p></div>
+      </div>
+      <div class="card s4">
+        <div class="k">Últimas requisições</div>
+        <ul id="log"></ul>
+      </div>
+    </main>
+    <script>
+      const COLORS=['#7c5cff','#3ddc97','#ffb84d','#4dc3ff','#ff6bcb','#c3ff4d','#ff8a4d','#9aa7ff'];
+      const STALE_MS=6000;
+      const pods={}; let colorIdx=0, total=0, fails=0, running=true, interval=500, timer=null;
+      const $=id=>document.getElementById(id);
+
+      function color(p){ if(!pods[p].color) pods[p].color=COLORS[colorIdx++%COLORS.length]; return pods[p].color; }
+
+      async function hit(){
+        const t=new Date().toLocaleTimeString('pt-BR');
+        try{
+          const r=await fetch('/api/info?'+Date.now(),{cache:'no-store'});
+          if(!r.ok) throw new Error('HTTP '+r.status);
+          const d=await r.json();
+          total++;
+          if(!pods[d.pod]) pods[d.pod]={n:0};
+          Object.assign(pods[d.pod],{node:d.node,ip:d.ip,last:Date.now()}); pods[d.pod].n++;
+          $('pod').textContent=d.pod; $('node').textContent=d.node; $('ip').textContent=d.ip;
+          const c=$('cPod'); c.classList.remove('flash'); void c.offsetWidth; c.classList.add('flash');
+          log(`<span class="sw" style="background:${color(d.pod)}"></span><span class="t">${t}</span><span>${d.pod.slice(-11)} @ ${d.node.replace('k3d-lab-','')}</span>`);
+        }catch(e){
+          fails++; log(`<span class="t">${t}</span><span class="err">falhou: ${e.message}</span>`);
+        }
+        render();
+      }
+
+      function log(html){
+        const li=document.createElement('li'); li.innerHTML=html;
+        const ul=$('log'); ul.prepend(li); while(ul.children.length>40) ul.lastChild.remove();
+      }
+
+      function render(){
+        $('total').textContent=total; $('fails').textContent=fails;
+        const names=Object.keys(pods).sort();
+        if(!names.length){ $('bars').innerHTML='<p class="empty">aguardando respostas…</p>'; return; }
+        const max=Math.max(...names.map(n=>pods[n].n));
+        const now=Date.now();
+        $('bars').innerHTML=names.map(n=>{
+          const p=pods[n], stale=now-p.last>STALE_MS;
+          return `<div class="bar ${stale?'stale':''}">
+            <div class="name">${n}${stale?'<span class="tag">sem resposta</span>':''}<small>${p.node} · ${p.ip}</small></div>
+            <div class="track"><div class="fill" style="width:${(p.n/max*100).toFixed(1)}%;background:${color(n)}"></div></div>
+            <div class="n">${p.n}</div></div>`;
+        }).join('');
+      }
+
+      function schedule(){ clearInterval(timer); if(running) timer=setInterval(hit,interval); }
+
+      $('toggle').onclick=()=>{ running=!running; $('toggle').textContent=running?'⏸ Pausar':'▶ Retomar';
+        $('live').classList.toggle('paused',!running); $('liveTxt').textContent=running?'ao vivo':'pausado'; schedule(); };
+      $('burst').onclick=()=>{ for(let i=0;i<50;i++) setTimeout(hit,i*20); };
+      $('reset').onclick=()=>{ for(const k in pods) delete pods[k]; total=fails=0; colorIdx=0; $('log').innerHTML=''; render(); };
+      $('rate').oninput=e=>{ interval=+e.target.value; $('rateTxt').textContent=interval+' ms'; schedule(); };
+
+      setInterval(render,1000);
+      schedule(); hit();
+    </script>
+    </body>
+    </html>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-dash
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: k8s-dash
+  template:
+    metadata:
+      labels:
+        app: k8s-dash
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /api/info
+              port: 80
+            periodSeconds: 3
+          volumeMounts:
+            - name: html
+              mountPath: /usr/share/nginx/html
+            - name: nginx-template
+              mountPath: /etc/nginx/templates
+      volumes:
+        - name: html
+          configMap:
+            name: k8s-dash-html
+        - name: nginx-template
+          configMap:
+            name: k8s-dash-nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-dash
+spec:
+  selector:
+    app: k8s-dash
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: k8s-dash
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: k8s-dash
+                port:
+                  number: 80
