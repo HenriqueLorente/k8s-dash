@@ -1,7 +1,10 @@
 # k8s-dash
 
 Painel interativo em nginx que mostra, ao vivo, **qual pod e qual nó** do Kubernetes respondeu cada requisição. Com ele dá para ver na prática o balanceamento de carga, o self-healing, a escala e o rolling update.
-  ![Painel k8s-dash](dashboard.png)
+
+![Painel k8s-dash](painel_k3d.png)
+
+Feito para o vídeo **Kubernetes na Prática** no YouTube, rodando num cluster local com **k3d**.
 
 Feito para o vídeo **Kubernetes na Prática** no YouTube, rodando num cluster local com **k3d**.
 
