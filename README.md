@@ -6,8 +6,6 @@ Painel interativo em nginx que mostra, ao vivo, **qual pod e qual nó** do Kuber
 
 Feito para o vídeo **Kubernetes na Prática** no YouTube, rodando num cluster local com **k3d**.
 
-Feito para o vídeo **Kubernetes na Prática** no YouTube, rodando num cluster local com **k3d**.
-
 ## O que tem no manifesto
 
 Tudo está em um único arquivo, o `k8s-dash.yaml`:
